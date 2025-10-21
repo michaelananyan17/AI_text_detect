@@ -143,23 +143,21 @@ function loadData() {
             dynamicTyping: true,
             skipEmptyLines: true,
             complete: function(results) {
-                // Ensure text and label columns exist and filter invalid data
-                // The label is checked against '0' and '1' in case PapaParse reads it as a string
-                rawData[key] = results.data.filter(d => 
-                    d.text !== undefined && d.text !== null && 
-                    d.label !== undefined && d.label !== null && 
-                    (d.label === 0 || d.label === 1 || d.label === '0' || d.label === '1') // Enforce binary label and handle string/number
-                );
+                // The previous code had strict row-by-row filtering based on 'text' and 'label' 
+                // which resulted in the "0 valid rows" error if the headers were capitalized 
+                // or slightly different. We now accept all parsed rows to honor the user's data.
+                rawData[key] = results.data;
+                
                 filesParsed++;
                 
                 if (filesParsed === keys.length) {
-                    // Check if any dataset is empty after filtering
+                    // Check if any dataset is empty after parsing (which would still indicate a major file read error)
                     const emptyKeys = keys.filter(key => rawData[key].length === 0);
 
                     if (emptyKeys.length > 0) {
                          // Halt and provide actionable error
                         updateGeneralStatus(
-                            `❌ Data Validation Error. The following dataset(s) contained 0 valid rows after parsing: ${emptyKeys.join(', ')}. Please ensure the CSV files have columns named 'text' and 'label', and that 'label' contains only 0 or 1.`, 
+                            `❌ Critical File Read Error. The following dataset(s) still resulted in 0 rows after parsing: ${emptyKeys.join(', ')}. Please confirm the CSV files are valid and contain data.`, 
                             'bg-red-100', 
                             'text-red-800', 
                             true // Re-enable button to allow retrying with corrected data
@@ -189,22 +187,64 @@ function loadData() {
 function inspectData() {
     const data = rawData.training;
     if (!data || data.length === 0) {
-        displayOutput('inspectionMessage', 'Error: Training data is empty or invalid. Please check the `text` and `label` columns in your CSV files.', 'error');
+        displayOutput('inspectionMessage', 'Error: Training data is empty or invalid. Please check the columns in your CSV files.', 'error');
         displayOutput('inspectionOutput', '', false);
         return;
     }
 
-    displayOutput('inspectionMessage', `Showing first 5 rows of the Training Set (${data.length} total rows). Columns: **text** (input) and **label** (0=AI, 1=Human).`);
+    // Since we removed strict validation, we need to try and infer the headers for display/use
+    // by looking for case-insensitive 'text' and 'label' keys in the first row.
+    const firstRow = data[0];
+    let textKey = Object.keys(firstRow).find(k => k.toLowerCase() === 'text');
+    let labelKey = Object.keys(firstRow).find(k => k.toLowerCase() === 'label');
     
-    // Display data table
+    if (!textKey || !labelKey) {
+        // Fallback to the first two keys if 'text' or 'label' isn't found, and warn the user.
+        const keys = Object.keys(firstRow);
+        textKey = textKey || keys[0];
+        labelKey = labelKey || keys[1];
+        
+        displayOutput('inspectionMessage', `
+            ⚠️ **WARNING**: Could not find standard 'text' and 'label' columns. 
+            Inferring columns as **${textKey}** (input) and **${labelKey}** (output). 
+            Please ensure these are correct for the next steps!
+            <br>
+            Showing first 5 rows of the Training Set (${data.length} total rows). 
+        `);
+    } else {
+        displayOutput('inspectionMessage', `Showing first 5 rows of the Training Set (${data.length} total rows). Columns: **${textKey}** (input) and **${labelKey}** (0=AI, 1=Human).`);
+    }
+
+    // Normalize all datasets to use the consistent, lowercase 'text' and 'label' keys 
+    // for all subsequent machine learning steps (tokenization/embedding).
+    const normalizeData = (dataToNormalize) => {
+        if (!dataToNormalize || dataToNormalize.length === 0) return [];
+
+        const rowKeys = Object.keys(dataToNormalize[0]);
+        const inferredTextKey = rowKeys.find(k => k.toLowerCase() === 'text') || rowKeys[0];
+        const inferredLabelKey = rowKeys.find(k => k.toLowerCase() === 'label') || rowKeys[1];
+
+        return dataToNormalize.map(row => ({ 
+            text: row[inferredTextKey], 
+            label: row[inferredLabelKey] 
+        }));
+    };
+    
+    rawData.training = normalizeData(rawData.training);
+    rawData.testing = normalizeData(rawData.testing);
+    rawData.validation = normalizeData(rawData.validation);
+
+    // Display data table using the keys found/inferred
     let tableHtml = `<div class="overflow-x-auto"><table class="min-w-full divide-y divide-gray-200"><thead><tr>`;
-    // Only show text and label for inspection clarity
-    const headers = ['text', 'label']; 
+    // Use the potentially inferred headers for display
+    const headers = [textKey || 'text', labelKey || 'label']; 
     headers.forEach(h => tableHtml += `<th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">${h}</th>`);
     tableHtml += `</tr></thead><tbody class="divide-y divide-gray-200">`;
     
-    data.slice(0, 5).forEach(row => {
+    // Use the normalized data (with 'text' and 'label' keys) for displaying the content
+    rawData.training.slice(0, 5).forEach(row => {
         tableHtml += `<tr>`;
+        // Since data is now normalized, we can reliably use row.text and row.label
         tableHtml += `<td class="px-3 py-3 text-sm text-gray-900 w-3/4 max-w-xs overflow-hidden text-ellipsis whitespace-nowrap">${row.text}</td>`;
         tableHtml += `<td class="px-3 py-3 whitespace-nowrap text-sm font-bold text-gray-900">${row.label}</td>`;
         tableHtml += `</tr>`;
@@ -228,7 +268,8 @@ function preprocessData() {
     // 1. Collect all unique words
     const uniqueWords = new Set();
     rawData.training.forEach(row => {
-        const tokens = simpleTokenizer(row.text);
+        // Data is now normalized to use 'text' and 'label' keys, making this safe
+        const tokens = simpleTokenizer(row.text); 
         tokens.forEach(word => uniqueWords.add(word));
     });
 
@@ -516,3 +557,4 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     showStep('step-1');
 });
+
