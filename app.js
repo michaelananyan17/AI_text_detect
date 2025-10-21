@@ -18,8 +18,11 @@ const MAX_SEQUENCE_LENGTH = 50; // Fixed sequence length for padding
 const EMBEDDING_DIM = 16;       // Fixed size for the embedding vector
 
 const loadedFiles = { training: null, testing: null, validation: null };
-const rawData = { training: null, testing: null, validation: null };
-const processedData = {}; 
+// This will store the raw, parsed data from PapaParse
+const rawParsedData = { training: null, testing: null, validation: null }; 
+// This will store the cleaned and normalized data for ML
+const normalizedData = { training: null, testing: null, validation: null }; 
+
 let model = null;
 let wordIndex = {}; // Vocabulary map: word -> index
 let VOCAB_SIZE = 0; // Calculated size of vocabulary
@@ -55,12 +58,13 @@ function updateGeneralStatus(message, bgColor = 'bg-gray-100', textColor = 'text
 
     if (generalStatus) {
         generalStatus.className = `mt-4 p-3 rounded-lg text-center font-medium transition-all duration-300 ${bgColor} ${textColor}`;
-        generalStatus.textContent = message;
+        generalStatus.innerHTML = message;
     }
     
     if (processBtn) {
         // Only disable the button if not all files are loaded, unless a data parsing error occurred (bg-yellow-100 is for processing)
         const allFilesReady = Object.values(loadedFiles).every(f => f !== null);
+        // Only enable if files are ready AND no active processing is happening (bg-yellow)
         processBtn.disabled = !allFilesReady || (bgColor === 'bg-yellow-100') || !enableProcess;
     }
 }
@@ -121,10 +125,10 @@ function handleFileChange(event) {
 
     const allFilesReady = Object.values(loadedFiles).every(f => f !== null);
     updateGeneralStatus(
-        allFilesReady ? "All files successfully loaded. Ready to process." : "Please ensure all three files are selected and named correctly.",
+        allFilesReady ? "All files successfully loaded. Ready to parse." : "Please ensure all three files are selected and named correctly.",
         allFilesReady ? 'bg-green-100' : 'bg-gray-100',
         allFilesReady ? 'text-green-800' : 'text-gray-600',
-        allFilesReady
+        allFilesReady // Enable button if files are ready
     );
 }
 
@@ -140,19 +144,15 @@ function loadData() {
 
         Papa.parse(file, {
             header: true,
-            dynamicTyping: true,
+            dynamicTyping: true, // Let PapaParse try to infer types
             skipEmptyLines: true,
             complete: function(results) {
-                // The previous code had strict row-by-row filtering based on 'text' and 'label' 
-                // which resulted in the "0 valid rows" error if the headers were capitalized 
-                // or slightly different. We now accept all parsed rows to honor the user's data.
-                rawData[key] = results.data;
-                
+                rawParsedData[key] = results.data;
                 filesParsed++;
                 
                 if (filesParsed === keys.length) {
-                    // Check if any dataset is empty after parsing (which would still indicate a major file read error)
-                    const emptyKeys = keys.filter(key => rawData[key].length === 0);
+                    // Check if any dataset is empty after parsing (should only happen if file is empty or malformed)
+                    const emptyKeys = keys.filter(key => rawParsedData[key].length === 0);
 
                     if (emptyKeys.length > 0) {
                          // Halt and provide actionable error
@@ -160,13 +160,13 @@ function loadData() {
                             `❌ Critical File Read Error. The following dataset(s) still resulted in 0 rows after parsing: ${emptyKeys.join(', ')}. Please confirm the CSV files are valid and contain data.`, 
                             'bg-red-100', 
                             'text-red-800', 
-                            true // Re-enable button to allow retrying with corrected data
+                            true // Re-enable button to allow retrying
                         );
                         // Reset visibility to Step 1
                         showStep('step-1'); 
                     } else {
                         // SUCCESS PATH
-                        updateGeneralStatus(`✅ All data successfully parsed. Training: ${rawData.training.length} rows. Ready for inspection.`, 'bg-green-100', 'text-green-800', false);
+                        updateGeneralStatus(`✅ All data successfully parsed. Training: ${rawParsedData.training.length} rows. Ready for inspection.`, 'bg-green-100', 'text-green-800', true);
                         document.getElementById('step-2').style.display = 'block';
                         document.getElementById('inspectBtn').disabled = false;
                         showStep('step-2');
@@ -183,23 +183,26 @@ function loadData() {
 
 // --- STEP 2: DATA INSPECTION ---
 
-/** Inspects the loaded data (using training set) and shows statistics. */
+/** Inspects the loaded data, normalizes columns, and validates labels. */
 function inspectData() {
-    const data = rawData.training;
-    if (!data || data.length === 0) {
+    const dataKey = 'training';
+    const rawData = rawParsedData[dataKey];
+
+    if (!rawData || rawData.length === 0) {
         displayOutput('inspectionMessage', 'Error: Training data is empty or invalid. Please check the columns in your CSV files.', 'error');
         displayOutput('inspectionOutput', '', false);
         return;
     }
 
-    // Since we removed strict validation, we need to try and infer the headers for display/use
-    // by looking for case-insensitive 'text' and 'label' keys in the first row.
-    const firstRow = data[0];
-    let textKey = Object.keys(firstRow).find(k => k.toLowerCase() === 'text');
-    let labelKey = Object.keys(firstRow).find(k => k.toLowerCase() === 'label');
+    // 1. Infer and normalize headers
+    const firstRow = rawData[0];
+    const rowKeys = Object.keys(firstRow);
+    
+    // Find text and label keys (case-insensitive)
+    let textKey = rowKeys.find(k => k.toLowerCase() === 'text');
+    let labelKey = rowKeys.find(k => k.toLowerCase() === 'label');
     
     if (!textKey || !labelKey) {
-        // Fallback to the first two keys if 'text' or 'label' isn't found, and warn the user.
         const keys = Object.keys(firstRow);
         textKey = textKey || keys[0];
         labelKey = labelKey || keys[1];
@@ -207,50 +210,84 @@ function inspectData() {
         displayOutput('inspectionMessage', `
             ⚠️ **WARNING**: Could not find standard 'text' and 'label' columns. 
             Inferring columns as **${textKey}** (input) and **${labelKey}** (output). 
-            Please ensure these are correct for the next steps!
+            Please ensure these are correct!
             <br>
-            Showing first 5 rows of the Training Set (${data.length} total rows). 
+            Showing first 5 rows of the Training Set (${rawData.length} total rows). 
         `);
     } else {
-        displayOutput('inspectionMessage', `Showing first 5 rows of the Training Set (${data.length} total rows). Columns: **${textKey}** (input) and **${labelKey}** (0=AI, 1=Human).`);
+        displayOutput('inspectionMessage', `Showing first 5 rows of the Training Set (${rawData.length} total rows). Columns: **${textKey}** (input) and **${labelKey}** (0=AI, 1=Human).`);
     }
 
-    // Normalize all datasets to use the consistent, lowercase 'text' and 'label' keys 
-    // for all subsequent machine learning steps (tokenization/embedding).
-    const normalizeData = (dataToNormalize) => {
-        if (!dataToNormalize || dataToNormalize.length === 0) return [];
+    // 2. Normalize and Validate ALL Data
+    const keysToNormalize = Object.keys(rawParsedData);
+    let totalInvalidRows = 0;
 
-        const rowKeys = Object.keys(dataToNormalize[0]);
-        const inferredTextKey = rowKeys.find(k => k.toLowerCase() === 'text') || rowKeys[0];
-        const inferredLabelKey = rowKeys.find(k => k.toLowerCase() === 'label') || rowKeys[1];
+    keysToNormalize.forEach(key => {
+        const dataToNormalize = rawParsedData[key];
+        let invalidRows = 0;
+        
+        normalizedData[key] = dataToNormalize.map(row => {
+            const text = row[textKey];
+            const rawLabel = row[labelKey];
+            let label = null;
 
-        return dataToNormalize.map(row => ({ 
-            text: row[inferredTextKey], 
-            label: row[inferredLabelKey] 
-        }));
-    };
+            // Robust Label Conversion: Handles numeric 0/1, string '0'/'1', and converts to actual number (0 or 1)
+            if (rawLabel === 0 || rawLabel === 1) {
+                label = rawLabel;
+            } else if (typeof rawLabel === 'string') {
+                const trimmed = rawLabel.trim();
+                if (trimmed === '0') label = 0;
+                else if (trimmed === '1') label = 1;
+            }
+            
+            // Validate: check if text is present and label is a valid 0 or 1
+            if (typeof text !== 'string' || text.length === 0 || label === null) {
+                invalidRows++;
+                return null; // Exclude invalid rows
+            }
+
+            return { text: String(text), label: label };
+        }).filter(row => row !== null);
+        
+        totalInvalidRows += invalidRows;
+    });
+
+    if (totalInvalidRows > 0) {
+        // Halt if invalid rows were found across any dataset
+        updateGeneralStatus(
+            `❌ Data Validation Error. A total of **${totalInvalidRows}** rows were excluded across all datasets. Please ensure all rows have non-empty text and the label column contains only 0 or 1.`,
+            'bg-red-100',
+            'text-red-800',
+            true // Allow retry
+        );
+        // Reset to step 1 (or keep at step 2 with error)
+        return;
+    }
     
-    rawData.training = normalizeData(rawData.training);
-    rawData.testing = normalizeData(rawData.testing);
-    rawData.validation = normalizeData(rawData.validation);
-
-    // Display data table using the keys found/inferred
+    // 3. Display data table using the keys found/inferred
     let tableHtml = `<div class="overflow-x-auto"><table class="min-w-full divide-y divide-gray-200"><thead><tr>`;
-    // Use the potentially inferred headers for display
-    const headers = [textKey || 'text', labelKey || 'label']; 
+    const headers = [textKey, labelKey]; 
     headers.forEach(h => tableHtml += `<th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase">${h}</th>`);
     tableHtml += `</tr></thead><tbody class="divide-y divide-gray-200">`;
     
     // Use the normalized data (with 'text' and 'label' keys) for displaying the content
-    rawData.training.slice(0, 5).forEach(row => {
+    normalizedData[dataKey].slice(0, 5).forEach(row => {
         tableHtml += `<tr>`;
-        // Since data is now normalized, we can reliably use row.text and row.label
         tableHtml += `<td class="px-3 py-3 text-sm text-gray-900 w-3/4 max-w-xs overflow-hidden text-ellipsis whitespace-nowrap">${row.text}</td>`;
         tableHtml += `<td class="px-3 py-3 whitespace-nowrap text-sm font-bold text-gray-900">${row.label}</td>`;
         tableHtml += `</tr>`;
     });
     tableHtml += `</tbody></table></div>`;
     displayOutput('inspectionOutput', tableHtml);
+
+    // Final success message for data inspection
+    updateGeneralStatus(
+        `✅ All data successfully inspected and cleaned. Training: ${normalizedData.training.length} rows. Ready for preprocessing.`,
+        'bg-green-100',
+        'text-green-800',
+        false // Disable process button as we move to next step
+    );
+
 
     // Enable next step
     document.getElementById('step-3').style.display = 'block';
@@ -267,14 +304,13 @@ function preprocessData() {
     
     // 1. Collect all unique words
     const uniqueWords = new Set();
-    rawData.training.forEach(row => {
-        // Data is now normalized to use 'text' and 'label' keys, making this safe
+    normalizedData.training.forEach(row => {
         const tokens = simpleTokenizer(row.text); 
         tokens.forEach(word => uniqueWords.add(word));
     });
 
     // 2. Create word-to-index map (index starts at 1, 0 is reserved for padding)
-    let index = 1; 
+    let index = 2; // Start index at 2
     wordIndex = { '<PAD>': 0, '<OOV>': 1 }; // OOV (Out-Of-Vocabulary) placeholder at index 1
     uniqueWords.forEach(word => {
         if (!wordIndex[word]) {
@@ -322,7 +358,7 @@ function createEmbeddings() {
     
     try {
         ['training', 'testing', 'validation'].forEach(key => {
-            const data = rawData[key];
+            const data = normalizedData[key];
 
             const sequences = data.map(row => processTextToSequence(row.text, wordIndex, MAX_SEQUENCE_LENGTH));
             const labels = data.map(row => row.label);
@@ -557,4 +593,3 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     showStep('step-1');
 });
-
